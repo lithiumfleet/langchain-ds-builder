@@ -16,6 +16,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader
 from abc import abstractmethod
 from functools import partial
+from langchain.schema.document import Document
+
 
 
 
@@ -56,6 +58,7 @@ class Student(Runnable):
         ans:Answer = chain.invoke(input)
         ans.question = input
         return ans
+
 
 
 class GoodStudent(Student):
@@ -102,6 +105,7 @@ class GoodStudent(Student):
         self.chain = chain
         
         return chain
+
 
 
 class NormalStudent(Student):
@@ -170,6 +174,8 @@ class Teacher(Runnable):
                 """)
         ])
 
+        self.find_student_name = RunnableLambda(partial(self.find_student_name_fromlist,namelist=[i.student_name for i in input]))
+
         chain = (
             {
                 "question": RunnablePassthrough() | RunnableLambda(lambda x: x[0].question.content),
@@ -187,7 +193,6 @@ class Teacher(Runnable):
 
     def invoke(self, input: list[Answer], config: RunnableConfig | None = None) -> Answer:
 
-        self.find_student_name = RunnableLambda(partial(self.find_student_name_fromlist,namelist=[i.student_name for i in input]))
         chain = self.get_chain()
 
         preference_studnet_name:str = chain.invoke(input)
@@ -202,17 +207,95 @@ class Teacher(Runnable):
 
 
 
+class Questioner(Runnable):
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.chain = None
+        self.model_name = "/data/lixubin/models/Qwen/Qwen1.5-32B-Chat"
+        self.base_url = "http://127.0.0.1:9779/v1"
+        self.llm = ChatOpenAI(model=self.model_name ,base_url=self.base_url)
+
+    @staticmethod
+    def find_questions(input:AIMessage) -> list[Question]:
+        markdown_content = re.search(r"(?<=(```markdown))(.|[\r\n])*(?=(```))", input.content)
+        assert not markdown_content is None, RuntimeError(f"Can't find markdown in: {input.content}")
+
+        questions = [i.group() for i in re.finditer(r"(?<=(题[:：])).*", markdown_content.group())]
+        answers = [j.group() for j in re.finditer(r"(?<=(答案[:：])).*", markdown_content.group())]
+        assert not (questions is None or answers is None), RuntimeError(f"Can't find questions or answers in: {input.content}")
+        assert len(questions) == len(answers), RuntimeError(f"Numbers not match: {input.content}")
+
+        return [Question(content=q.strip(), correct_answer=a.strip()) for q,a in zip(questions, answers)]
+
+    @staticmethod
+    def concat_docs(inputs:list[Document]) -> str:
+        return "\n......\n".join([doc.page_content for doc in inputs])
+
+    def get_chain(self):
+        if not self.chain is None:
+            return self.chain
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("user", """你是一个优秀教师, 你现在要根据课本知识出一些课堂测试题. 
+                请针对含有知识点的课本片段内容(TextBook)制做一些问题-答案对. 问题类型可以多样, 如阐述概念题,判断题,推理题等.
+                你的回答应该使用markdown格式. 
+                假设TextBook是关于阿尔卑斯山脉的信息, 对应的示例输出如下:
+                示例输出:
+                ```markdown
+                + 第1题
+                问题: 什么是阿尔卑斯山?
+                答案: 阿尔卑斯山是欧洲最高及横跨范围最广的山脉，它覆盖了意大利北部边界、法国东南部、瑞士、列支敦士登、奥地利、德国南部及斯洛文尼亚。它可以被细分为三个部分：从地中海到勃朗峰的西阿尔卑斯山，从瓦莱达奥斯塔到布伦纳山口（奥地利和意大利交界处）的中阿尔卑斯山，从布伦纳山口到斯洛文尼亚的东阿尔卑斯山。欧洲许多大河都发源于此，水力资源丰富，为旅游、度假、疗养胜地。
+                + 第2题
+                问题: 为什么阿尔卑斯山南边和北边的气候差异大?
+                答案: 阿尔卑斯山位在温带，但又有高海拔地形。世界上因为高海拔，以致气候类似极地的地区称为高山气候。由海平面往上升，气温会渐渐下降（见气温垂直递减率）。山上盛行风的影响，使得山下的暖空气流动到山上，其体积膨胀，因此会失去热量，因此水汽会凝结，产生降雨甚至降雪。阿尔卑斯山的高度阻挡了水汽，因此将阿尔卑斯山北边是水汽较多的气候，而南边则较为干燥。
+                ```
+                (示例结束)
+
+                TextBook:
+                    {doc}
+                """),
+        ])
+        
+        # FIXME: docs can(should) be cross books
+        chain = (
+            {"doc": RunnablePassthrough() | RunnableLambda(self.concat_docs)}
+            | prompt
+            | self.llm
+            | RunnableLambda(self.find_questions)
+        )
+        
+        self.chain = chain
+        return chain
+
+    def invoke(self, input:Document|list[Document], config: RunnableConfig | None = None) -> list[Question]:
+        if not isinstance(input, list):
+            input = [input]
+        chain = self.get_chain()
+        question = chain.invoke(input)
+        return question
+
+
+
 
 if __name__ == "__main__":
     import os
     os.environ["OPENAI_API_KEY"] = "sk-"
+
     # stu = GoodStudent("lithium")
-    question_1 = Question(content="春日影是什么?", correct_answer="是乐队CRYCHIC的代表作品.", doc=None)
+    # question_1 = Question(content="春日影是什么?", correct_answer="是乐队CRYCHIC的代表作品.")
     # ans = stu.invoke(question_1)
     # print(ans)
-    answer_1 = Answer(student_name="lithium",content="春日影是某个乐队的歌曲,具体来说是CRYCHIC",question=question_1)
-    answer_2 = Answer(student_name="andrewfleet",content="春日影的由来: 灯答应祥子组建乐队后，在祥子的引见下认识了吉他手若叶睦、贝斯手长崎爽世和鼓手椎名立希，五人共同组建了乐队CRYCHIC。由灯作词、祥子作曲，她们创作出了属于五人的第一首也是最后一首歌曲《春日影》。在正式练习的过程中，也许是由于灯向来孤僻内向的性格，担任主唱的她却唱不出声音某主唱：？。在其他人的全力帮助下，她们通过卡拉OK等方式让灯逐渐敢于开口歌唱，并最终录下了一曲完美的《春日影》。",
-        question=question_1)
-    tea = Teacher()
-    prefernce = tea.invoke([answer_1, answer_2])
-    print(prefernce)
+
+    # question_1 = Question(content="春日影是什么?", correct_answer="是乐队CRYCHIC的代表作品.")
+    # answer_1 = Answer(student_name="lithium",content="春日影是某个乐队的歌曲,具体来说是CRYCHIC",question=question_1)
+    # answer_2 = Answer(student_name="andrewfleet",content="春日影的由来: 灯答应祥子组建乐队后，在祥子的引见下认识了吉他手若叶睦、贝斯手长崎爽世和鼓手椎名立希，五人共同组建了乐队CRYCHIC。由灯作词、祥子作曲，她们创作出了属于五人的第一首也是最后一首歌曲《春日影》。在正式练习的过程中，也许是由于灯向来孤僻内向的性格，担任主唱的她却唱不出声音某主唱：？。在其他人的全力帮助下，她们通过卡拉OK等方式让灯逐渐敢于开口歌唱，并最终录下了一曲完美的《春日影》。",
+    # tea = Teacher()
+    # prefernce = tea.invoke([answer_1, answer_2])
+    # print(prefernce)
+
+    maker = Questioner()
+    doc = Document(page_content="""触发器（英语：Flip-flop, FF），中国大陆译作“触发器”、台湾及香港译作“正反器”，是一种具有两种稳态的用于储存的组件，可记录二进制数字信号“1”和“0”。触发器是一种双稳态多谐振荡器（bistable multivibrator）。该电路可以通过一个或多个施加在控制输入端的信号来改变自身的状态，并会有1个或2个输出。触发器是构成时序逻辑电路以及各种复杂数字系统的基本逻辑单元。触发器和锁存器是在计算机、通讯和许多其他类型的系统中使用的数字电子系统的基本组成部分。触发器的线路图由逻辑门组合而成，其结构均由SR锁存器派生而来（广义的触发器包括锁存器）。触发器可以处理输入、输出信号和时序脉波（CK）之间的相互影响。这里的触发器特指flip-flop，flip-flop一词主要是指具有两个状态相互翻转，例如编程语言中使用flip-flop buffer（翻译作双缓冲）""")
+    questions = maker.invoke(input=doc)
+    print(questions)
+

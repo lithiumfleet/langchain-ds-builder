@@ -15,7 +15,6 @@ class Doc:
 class Question:
     content:str
     correct_answer:str
-    doc:Doc
 
 
 @dataclass
