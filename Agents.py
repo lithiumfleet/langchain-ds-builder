@@ -30,11 +30,11 @@ class Student(Runnable):
         self.llm = ChatOpenAI(model=self.model_name ,base_url=self.base_url)
         self.format_input = RunnableLambda(self.format_input)
         self.format_output = RunnableLambda(self.format_output)
-        self.chain = None
+        self.chain = self.get_which_chain()
         self.student_name = student_name
 
     def format_output(self, input:AIMessage) -> Answer:
-        return Answer(student_name=self.student_name, content=input.content)
+        return Answer(student_name=self.student_name, content=input.content, question=self.cur_question)
 
     @staticmethod
     def format_input(input:Question) -> str:
@@ -53,9 +53,10 @@ class Student(Runnable):
         config: RunnableConfig | None = None
         ) -> Answer:
 
-        chain = self.get_which_chain()
+        self.cur_question = input
 
-        ans:Answer = chain.invoke(input)
+
+        ans:Answer = self.chain.invoke(input)
         ans.question = input
         return ans
 
@@ -63,9 +64,6 @@ class Student(Runnable):
 
 class GoodStudent(Student):
     def get_which_chain(self):
-        if not self.chain is None:
-            return self.chain
-
         from langchain_community.embeddings import HuggingFaceEmbeddings
         model_name = "/data/lixubin/models/m3e-base"
         model_kwargs = {'device': 'cuda'}
@@ -102,18 +100,13 @@ class GoodStudent(Student):
             | self.format_output
         )
 
-        self.chain = chain
-        
-        return chain
+        return  chain
 
 
 
 class NormalStudent(Student):
     
     def get_which_chain(self):
-        if not self.chain is None:
-            return  self.chain
-            
         prompt = ChatPromptTemplate.from_messages([
             ("user", "请一步一步思考, 回答问题: {question}")
         ])
@@ -124,8 +117,7 @@ class NormalStudent(Student):
             | self.format_output
         )
 
-        self.chain = chain
-        return 
+        return chain
 
 
 
@@ -136,16 +128,16 @@ class Teacher(Runnable):
 
     def __init__(self) -> None:
         super().__init__()
-        self.chain = None
         self.model_name = "/data/lixubin/models/Qwen/Qwen1.5-32B-Chat"
         self.base_url = "http://127.0.0.1:9779/v1"
         self.llm = ChatOpenAI(model=self.model_name ,base_url=self.base_url)
+        self.chain = self.get_chain()
 
 
     @staticmethod
-    def find_student_name_fromlist(input:AIMessage, namelist:list[str]):
-        res = re.search(r"(?<=(最好的学生是[:：]))\s?[^\s]*(?=[\s。.])", input.content)
-        assert not res is None, ValueError(f"Can't match student name in content: {input.content}")
+    def find_student_name_fromlist(input:AIMessage) -> str:
+        res = re.search(r"(?<=(最好的学生是)).*", input.content)
+        assert not len(res.group()) == 0, ValueError(f"Can't match student name in content: {input.content}")
         return res.group()
 
 
@@ -156,11 +148,9 @@ class Teacher(Runnable):
 
 
     def get_chain(self):
-        if not self.chain is None:
-            return self.chain
-
         prompt = ChatPromptTemplate.from_messages([
-            ("user", """你是一位资深心理学教授, 请先根据问题(Question)正确答案(Correct_Answer)一步一步进行分析学生们的回答(Student_Answers)的好坏, 再根据打分标准(Regulars)从中挑选出最好的学生, 需要注意打分标准是按照重要性降序的. 你的最后一句话应该是:"最好的学生是：(学生姓名)"
+            ("user", """你是一位阅卷教师, 请先根据问题(Question)正确答案(Correct_Answer)一步一步进行分析学生们的回答(Student_Answers)的好坏, 再根据打分标准(Regulars)从中挑选出最好的学生, 需要注意打分标准是按照重要性降序的.
+                你的最后一句话应该是:"最好的学生是: (学生姓名)". 如果没有学生答对, 你的最后一句话应该是:"最好的学生是: none"
                 Question:
                     {question}
                 Correct_Answer:
@@ -168,13 +158,12 @@ class Teacher(Runnable):
                 Student_Answers:
                     {student_answers}
                 Regulars(从重要到次要):
+                    1. 学生答案应该尽可能贴近标准答案,并且学生答案不应该过度分析;
                     1. 学生的答案应该尽可能简明扼要;
                     2. 答案应该有条理, 不应该逻辑混乱;
                     3. 学生应该充分考虑各种条件, 尽可能全面考虑.
                 """)
         ])
-
-        self.find_student_name = RunnableLambda(partial(self.find_student_name_fromlist,namelist=[i.student_name for i in input]))
 
         chain = (
             {
@@ -184,10 +173,9 @@ class Teacher(Runnable):
             }
             | prompt
             | self.llm
-            | self.find_student_name
+            | RunnableLambda(self.find_student_name_fromlist)
         )
-        
-        self.chain = chain
+
         return chain
     
 
@@ -196,14 +184,18 @@ class Teacher(Runnable):
         chain = self.get_chain()
 
         preference_studnet_name:str = chain.invoke(input)
+        
         result = None
         for ans in input:
-            if ans.student_name == preference_studnet_name:
+            if ans.student_name.lower() in preference_studnet_name.lower():
                 result = ans
                 break
+        if "none" in preference_studnet_name.lower():
+            result = Answer(student_name="correct_answer", content=input[0].question.correct_answer, question=input[0].question)
+
         assert not result is None
 
-        return ans
+        return result
 
 
 
@@ -211,18 +203,20 @@ class Questioner(Runnable):
 
     def __init__(self) -> None:
         super().__init__()
-        self.chain = None
         self.model_name = "/data/lixubin/models/Qwen/Qwen1.5-32B-Chat"
         self.base_url = "http://127.0.0.1:9779/v1"
         self.llm = ChatOpenAI(model=self.model_name ,base_url=self.base_url)
+        self.chain = self.get_chain()
 
     @staticmethod
     def find_questions(input:AIMessage) -> list[Question]:
-        markdown_content = re.search(r"(?<=(```markdown))(.|[\r\n])*(?=(```))", input.content)
+        # markdown_content = re.search(r"(?<=(```markdown))(.|[\r\n])*(?=(```))", input.content)
+        markdown_content = re.search(r"(?<=(```markdown))(.|\n)*", input.content)
         assert not markdown_content is None, RuntimeError(f"Can't find markdown in: {input.content}")
 
-        questions = [i.group() for i in re.finditer(r"(?<=(题[:：])).*", markdown_content.group())]
-        answers = [j.group() for j in re.finditer(r"(?<=(答案[:：])).*", markdown_content.group())]
+        # questions = [i.group() for i in re.finditer(r"(?<=(题[:：])).*", markdown_content.group())]
+        questions = [i.group() for i in re.finditer(r"(?<=(题目: ))[^\n]*", markdown_content.group())]
+        answers = [j.group() for j in re.finditer(r"(?<=(答案: ))[^\n]*", markdown_content.group())]
         assert not (questions is None or answers is None), RuntimeError(f"Can't find questions or answers in: {input.content}")
         assert len(questions) == len(answers), RuntimeError(f"Numbers not match: {input.content}")
 
@@ -233,22 +227,22 @@ class Questioner(Runnable):
         return "\n......\n".join([doc.page_content for doc in inputs])
 
     def get_chain(self):
-        if not self.chain is None:
-            return self.chain
-
         prompt = ChatPromptTemplate.from_messages([
             ("user", """你是一个优秀教师, 你现在要根据课本知识出一些课堂测试题. 
-                请针对含有知识点的课本片段内容(TextBook)制做一些问题-答案对. 问题类型可以多样, 如阐述概念题,判断题,推理题等.
-                你的回答应该使用markdown格式. 
+                请针对含有知识点的课本片段内容(TextBook)制做3道高质量的困难的问题-答案对. 问题类型可以多样, 如阐述概念题,判断题,推理题等.
+                你的回答应该使用markdown格式. 一定要参考接下来的示例输出, 在开头加上"```markdown", 在每个题目和问题前面都要加上"题目: ","答案: ".
                 假设TextBook是关于阿尔卑斯山脉的信息, 对应的示例输出如下:
                 示例输出:
                 ```markdown
                 + 第1题
-                问题: 什么是阿尔卑斯山?
+                题目: 什么是阿尔卑斯山?
                 答案: 阿尔卑斯山是欧洲最高及横跨范围最广的山脉，它覆盖了意大利北部边界、法国东南部、瑞士、列支敦士登、奥地利、德国南部及斯洛文尼亚。它可以被细分为三个部分：从地中海到勃朗峰的西阿尔卑斯山，从瓦莱达奥斯塔到布伦纳山口（奥地利和意大利交界处）的中阿尔卑斯山，从布伦纳山口到斯洛文尼亚的东阿尔卑斯山。欧洲许多大河都发源于此，水力资源丰富，为旅游、度假、疗养胜地。
                 + 第2题
-                问题: 为什么阿尔卑斯山南边和北边的气候差异大?
+                题目: 为什么阿尔卑斯山南边和北边的气候差异大?
                 答案: 阿尔卑斯山位在温带，但又有高海拔地形。世界上因为高海拔，以致气候类似极地的地区称为高山气候。由海平面往上升，气温会渐渐下降（见气温垂直递减率）。山上盛行风的影响，使得山下的暖空气流动到山上，其体积膨胀，因此会失去热量，因此水汽会凝结，产生降雨甚至降雪。阿尔卑斯山的高度阻挡了水汽，因此将阿尔卑斯山北边是水汽较多的气候，而南边则较为干燥。
+                + 第3题
+                题目: 阿尔卑斯山脉的地理意义是什么?
+                答案: 阿尔卑斯山脉的气候成为中欧温带大陆性气候和南欧亚热带气候的分界线。山地气候冬凉夏暖。大致每升高200米，温度下降1℃，在海拔2000米处年平均气温为0℃。整个阿尔卑斯山湿度很大。年降水量一般为1200～2000毫米。海拔3000米左右为最大降水带。边缘地区年降水量和山脉内部年降水量差异很大。海拔3200米以上为终年积雪区。阿尔卑斯山区常有焚风出现，引起冰雪迅速融化或雪崩而造成灾害。阿尔卑斯山脉是欧洲许多河流的发源地和分水岭。多瑙河、莱茵河、波河、罗讷河都发源于此。山地河流上游，水流湍急，水力资源丰富，又有利于发电。此外,此地栖息着各种动植物,代表有阿尔卑斯大角山羊、山兔、雷鸟、小羚羊和土拨鼠等。
                 ```
                 (示例结束)
 
@@ -264,8 +258,6 @@ class Questioner(Runnable):
             | self.llm
             | RunnableLambda(self.find_questions)
         )
-        
-        self.chain = chain
         return chain
 
     def invoke(self, input:Document|list[Document], config: RunnableConfig | None = None) -> list[Question]:
@@ -296,6 +288,8 @@ if __name__ == "__main__":
 
     maker = Questioner()
     doc = Document(page_content="""触发器（英语：Flip-flop, FF），中国大陆译作“触发器”、台湾及香港译作“正反器”，是一种具有两种稳态的用于储存的组件，可记录二进制数字信号“1”和“0”。触发器是一种双稳态多谐振荡器（bistable multivibrator）。该电路可以通过一个或多个施加在控制输入端的信号来改变自身的状态，并会有1个或2个输出。触发器是构成时序逻辑电路以及各种复杂数字系统的基本逻辑单元。触发器和锁存器是在计算机、通讯和许多其他类型的系统中使用的数字电子系统的基本组成部分。触发器的线路图由逻辑门组合而成，其结构均由SR锁存器派生而来（广义的触发器包括锁存器）。触发器可以处理输入、输出信号和时序脉波（CK）之间的相互影响。这里的触发器特指flip-flop，flip-flop一词主要是指具有两个状态相互翻转，例如编程语言中使用flip-flop buffer（翻译作双缓冲）""")
+    print("[Text Chunck]\n"+doc.page_content)
     questions = maker.invoke(input=doc)
-    print(questions)
+    print("\n[Make Questions]")
+    print("\n".join([i.__repr__() for i in questions]))
 
