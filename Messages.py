@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from langchain_core.runnables.base import Runnable
+from collections import namedtuple
 from langchain_core.runnables.config import RunnableConfig
 
 
@@ -22,6 +23,15 @@ class Answer:
     student_name:str
     content:str
     question:Question
+
+@dataclass
+class Sample:
+    prompt:str
+    chosen:str
+    reject:str
+    correct:str
+
+
 
 
 # @dataclass

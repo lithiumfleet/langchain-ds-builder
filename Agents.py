@@ -2,21 +2,19 @@ __import__('pysqlite3')
 import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 import re
+import os
 from langchain_core.runnables.base import Runnable, RunnableLambda
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.runnables.config import RunnableConfig
 from Messages import Question, Answer
-from typing import Union
-from langchain_openai import ChatOpenAI
 from langchain_core.prompts.chat import ChatPromptTemplate
 from langchain_core.messages import AIMessage
 from langchain_community.vectorstores import Chroma
-from langchain_openai import OpenAIEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader
 from abc import abstractmethod
-from functools import partial
 from langchain.schema.document import Document
+from LLM import get_llm_client
+from LoadDocs import  load_docs_from_path
 
 
 
@@ -25,9 +23,7 @@ class Student(Runnable):
 
     def __init__(self, student_name:str) -> None:
         super().__init__()
-        self.model_name = "/data/lixubin/models/Qwen/Qwen1.5-32B-Chat"
-        self.base_url = "http://127.0.0.1:9779/v1"
-        self.llm = ChatOpenAI(model=self.model_name ,base_url=self.base_url)
+        self.llm = get_llm_client()
         self.format_input = RunnableLambda(self.format_input)
         self.format_output = RunnableLambda(self.format_output)
         self.chain = self.get_which_chain()
@@ -73,12 +69,12 @@ class GoodStudent(Student):
             model_kwargs=model_kwargs,
             encode_kwargs=encode_kwargs
         )
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2048)
-        loader = TextLoader("./index.md")
-        docs = loader.load()
-        chunked_docs = text_splitter.split_documents(docs)
+        
+        # load multiple docs from here
+        docs = load_docs_from_path("/data/lixubin/RetrieveQA/data/input",chunck_size=768)
+        
         vectorstore = Chroma.from_documents(
-            chunked_docs,
+            docs,
             m3e
         )
 
@@ -86,7 +82,7 @@ class GoodStudent(Student):
         prompt = ChatPromptTemplate.from_messages([
             ("user", """
                 请一步一步思考, 利用下列检索到的上下文(Context)回答问题(Question)。
-                如果上下文中没有有用的信息, 请自由发挥。
+                如果上下文中没有有用的信息, 请自由发挥。 你不需要说明有没有找到信息, 不要提及你拥有上下文的事.
                 Context:
                     {context}
                 Question:
@@ -128,9 +124,7 @@ class Teacher(Runnable):
 
     def __init__(self) -> None:
         super().__init__()
-        self.model_name = "/data/lixubin/models/Qwen/Qwen1.5-32B-Chat"
-        self.base_url = "http://127.0.0.1:9779/v1"
-        self.llm = ChatOpenAI(model=self.model_name ,base_url=self.base_url)
+        self.llm = get_llm_client()
         self.chain = self.get_chain()
 
 
@@ -159,9 +153,9 @@ class Teacher(Runnable):
                     {student_answers}
                 Regulars(从重要到次要):
                     1. 学生答案应该尽可能贴近标准答案,并且学生答案不应该过度分析;
-                    1. 学生的答案应该尽可能简明扼要;
-                    2. 答案应该有条理, 不应该逻辑混乱;
-                    3. 学生应该充分考虑各种条件, 尽可能全面考虑.
+                    2. 学生的答案应该尽可能简明扼要;
+                    3. 答案应该有条理, 不应该逻辑混乱;
+                    4. 学生应该充分考虑各种条件, 尽可能全面考虑.
                 """)
         ])
 
@@ -203,9 +197,7 @@ class Questioner(Runnable):
 
     def __init__(self) -> None:
         super().__init__()
-        self.model_name = "/data/lixubin/models/Qwen/Qwen1.5-32B-Chat"
-        self.base_url = "http://127.0.0.1:9779/v1"
-        self.llm = ChatOpenAI(model=self.model_name ,base_url=self.base_url)
+        self.llm = get_llm_client()
         self.chain = self.get_chain()
 
     @staticmethod
@@ -229,7 +221,7 @@ class Questioner(Runnable):
     def get_chain(self):
         prompt = ChatPromptTemplate.from_messages([
             ("user", """你是一个优秀教师, 你现在要根据课本知识出一些课堂测试题. 
-                请针对含有知识点的课本片段内容(TextBook)制做3道高质量的困难的问题-答案对. 问题类型可以多样, 如阐述概念题,判断题,推理题等.
+                请针对含有知识点的课本片段内容(TextBook)制做3道高质量的困难的课堂测试题. 问题类型尽可能多样, 如阐述概念题,判断题,推理题等. 问题内容尽可能细致细节.
                 你的回答应该使用markdown格式. 一定要参考接下来的示例输出, 在开头加上"```markdown", 在每个题目和问题前面都要加上"题目: ","答案: ".
                 假设TextBook是关于阿尔卑斯山脉的信息, 对应的示例输出如下:
                 示例输出:

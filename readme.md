@@ -14,4 +14,5 @@ question maker负责根据文档片段提出问题和对应的答案. students�
 + [x] bad student
 + [x] good student
 + [x] teacher
-+ [ ] question maker
++ [x] question maker
++ [x] better IO
